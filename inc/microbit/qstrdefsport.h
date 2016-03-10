@@ -386,8 +386,13 @@ Q(randint)
 Q(choice)
 Q(uniform)
 
+Q(audio)
+Q(play)
+Q(AudioFrame)
+Q(pins)
+Q(source)
+
 Q(name)
-Q(os)
 
 Q(os)
 Q(uname)
