@@ -46,12 +46,14 @@ static inline char *microbit_end_of_code() {
     return (char *)(&__etext + (&__data_end__ - &__data_start__));
 }
 
-static inline char *microbit_end_of_rom() {
-    return (char *)0x40000;
+extern char* initial_script;
+
+inline char *microbit_end_of_rom() {
+    return initial_script;
 }
 
-static inline char *microbit_mp_appended_script() {
-    return (char *)0x3e000;
+inline char *microbit_mp_appended_script() {
+  return initial_script;
 }
 
 static inline void *microbit_compass_calibration_page(void) {

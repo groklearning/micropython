@@ -39,7 +39,9 @@
 #define MICROPY_QSTR_BYTES_IN_HASH  (1)
 
 // emitters
-#define MICROPY_EMIT_INLINE_THUMB   (1)
+#define MICROPY_EMIT_X64            (0)
+#define MICROPY_EMIT_THUMB          (0)
+#define MICROPY_EMIT_INLINE_THUMB   (0)
 #define MICROPY_EMIT_INLINE_THUMB_ARMV7M (0)
 #define MICROPY_EMIT_INLINE_THUMB_FLOAT (0)
 
@@ -173,3 +175,7 @@ void mp_hal_stdout_tx_strn_cooked(const char *str, mp_uint_t len);
 #ifndef M_PI
 #define M_PI (3.141592653589793)
 #endif
+
+// Grok micro:bit simulator hooks loop for timing synchronisation.
+extern void simulated_dal_micropy_vm_hook_loop();
+#define MICROPY_VM_HOOK_LOOP simulated_dal_micropy_vm_hook_loop();

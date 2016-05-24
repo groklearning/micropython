@@ -127,6 +127,7 @@ void microbit_music_tick(void) {
 STATIC void wait_async_music_idle(void) {
     // wait for the async music state to become idle
     while (music_data->async_state != ASYNC_MUSIC_STATE_IDLE) {
+      __WFI();
         // allow CTRL-C to stop the music
         if (MP_STATE_VM(mp_pending_exception) != MP_OBJ_NULL) {
             music_data->async_state = ASYNC_MUSIC_STATE_IDLE;

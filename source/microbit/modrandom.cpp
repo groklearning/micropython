@@ -34,7 +34,6 @@ extern "C" {
 
 #include <assert.h>
 #include <string.h>
-#include <string.h>
 
 #include "py/runtime.h"
 
@@ -114,6 +113,41 @@ STATIC MP_DEFINE_CONST_FUN_OBJ_2(mod_random_randint_obj, mod_random_randint);
 STATIC mp_obj_t mod_random_choice(mp_obj_t seq) {
     mp_int_t len = mp_obj_get_int(mp_obj_len(seq));
     if (len > 0) {
+        int32_t marker_len = 0;
+        const char* marker_result = NULL;
+        // If the marker is running, it can override an expected
+        // length of the sequence passed to random.choice
+        if (get_random_choice(&marker_len, &marker_result)) {
+            if (len != marker_len) {
+                // Report failure, but continue to use random anyway.
+                set_marker_failure_event("random", "Incorrect number of items passed to random.choice.");
+            } else {
+                // The marker can also optionally set a forced result
+                // which is the repr() of the expected item.
+                if (marker_result) {
+                    mp_obj_t iterable = mp_getiter(seq);
+                    mp_obj_t item;
+                    int32_t index = -1;
+                    int32_t i = 0;
+                    while ((item = mp_iternext(iterable)) != MP_OBJ_STOP_ITERATION) {
+                        vstr_t vstr;
+                        mp_print_t print;
+                        vstr_init_print(&vstr, 16, &print);
+                        mp_obj_print_helper(&print, item, PRINT_REPR);
+                        if (strcmp(vstr_null_terminated_str(&vstr), marker_result) == 0) {
+                            index = i;
+                        }
+                        vstr_free(&vstr);
+                        ++i;
+                    }
+                    if (index < 0) {
+                        set_marker_failure_event("random", "Item missing from random.choice.");
+                        index = randbelow(len);
+                    }
+                    return mp_obj_subscr(seq, mp_obj_new_int(index), MP_OBJ_SENTINEL);
+                }
+            }
+        }
         return mp_obj_subscr(seq, mp_obj_new_int(randbelow(len)), MP_OBJ_SENTINEL);
     } else {
         mp_raise_msg(&mp_type_IndexError, NULL);

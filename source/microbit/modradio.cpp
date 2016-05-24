@@ -24,6 +24,8 @@
  * THE SOFTWARE.
  */
 
+#include "MicroBit.h"
+
 extern "C" {
 
 #include <stdio.h>
@@ -70,43 +72,6 @@ static uint8_t *rx_buf_end = NULL; // pointer to the end of the allocated RX que
 static uint8_t *rx_buf = NULL; // pointer to last packet on the RX queue
 
 void RADIO_IRQHandler(void) {
-    if (NRF_RADIO->EVENTS_READY) {
-        NRF_RADIO->EVENTS_READY = 0;
-        NRF_RADIO->TASKS_START = 1;
-    }
-
-    if (NRF_RADIO->EVENTS_END) {
-        NRF_RADIO->EVENTS_END = 0;
-
-        size_t max_len = NRF_RADIO->PCNF1 & 0xff;
-        uint8_t *pkt = MP_STATE_PORT(radio_buf);
-        size_t len = pkt[0];
-        if (len > max_len) {
-            len = max_len;
-            pkt[0] = len;
-        }
-
-        // if the CRC was valid, and there's enough room in the RX queue, then accept the packet
-        if (NRF_RADIO->CRCSTATUS == 1 && rx_buf + RADIO_PACKET_OVERHEAD + len <= rx_buf_end) {
-            // copy the data to the queue
-            memcpy(rx_buf, pkt, 1 + len);
-
-            // store RSSI as last byte in packet (needs to be negated to get actual dBm value)
-            rx_buf[1 + len] = NRF_RADIO->RSSISAMPLE;
-
-            // get and store the microsecond timestamp
-            uint32_t time = us_ticker_read();
-            rx_buf[1 + len + 1] = time & 0xff;
-            rx_buf[1 + len + 2] = (time >> 8) & 0xff;
-            rx_buf[1 + len + 3] = (time >> 16) & 0xff;
-            rx_buf[1 + len + 4] = (time >> 24) & 0xff;
-
-            // move the RX queue pointer to end of this new packet
-            rx_buf += RADIO_PACKET_OVERHEAD + len;
-        }
-
-        NRF_RADIO->TASKS_START = 1;
-    }
 }
 
 static void ensure_enabled(void) {
@@ -116,15 +81,13 @@ static void ensure_enabled(void) {
 }
 
 static void radio_disable(void) {
-    NVIC_DisableIRQ(RADIO_IRQn);
-    NRF_RADIO->EVENTS_DISABLED = 0;
-    NRF_RADIO->TASKS_DISABLE = 1;
-    while (NRF_RADIO->EVENTS_DISABLED == 0);
     // free any old buffers
     if (MP_STATE_PORT(radio_buf) != NULL) {
         m_del(uint8_t, MP_STATE_PORT(radio_buf), rx_buf_end - MP_STATE_PORT(radio_buf));
         MP_STATE_PORT(radio_buf) = NULL;
     }
+
+    simulator_radio_config(false, radio_state.channel, radio_state.base0, radio_state.prefix0, radio_state.data_rate);
 }
 
 static void radio_enable(void) {
@@ -137,172 +100,39 @@ static void radio_enable(void) {
     rx_buf_end = MP_STATE_PORT(radio_buf) + max_payload * queue_len;
     rx_buf = MP_STATE_PORT(radio_buf) + max_payload; // start is tx/rx buffer
 
+    simulator_radio_config(true, radio_state.channel, radio_state.base0, radio_state.prefix0, radio_state.data_rate);
+
     // Enable the High Frequency clock on the processor. This is a pre-requisite for
     // the RADIO module. Without this clock, no communication is possible.
-    NRF_CLOCK->EVENTS_HFCLKSTARTED = 0;
-    NRF_CLOCK->TASKS_HFCLKSTART = 1;
-    while (NRF_CLOCK->EVENTS_HFCLKSTARTED == 0);
-
-    // power should be one of: -30, -20, -16, -12, -8, -4, 0, 4
-    NRF_RADIO->TXPOWER = radio_state.power_dbm;
-
-    // should be between 0 and 100 inclusive (actual physical freq is 2400MHz + this register)
-    NRF_RADIO->FREQUENCY = radio_state.channel;
-
-    // configure data rate
-    NRF_RADIO->MODE = radio_state.data_rate;
-
-    // The radio supports filtering packets at the hardware level based on an address.
-    // We use a 5-byte address comprised of 4 bytes (set by BALEN=4 below) from the BASEx
-    // register, plus 1 byte from PREFIXm.APn.
-    // The (x,m,n) values are selected by the logical address.  We use logical address 0
-    // which means using BASE0 with PREFIX0.AP0.
-    NRF_RADIO->BASE0 = radio_state.base0;
-    NRF_RADIO->PREFIX0 = radio_state.prefix0;
-    NRF_RADIO->TXADDRESS = 0; // transmit on logical address 0
-    NRF_RADIO->RXADDRESSES = 1; // a bit mask, listen only to logical address 0
-
-    // LFLEN=8 bits, S0LEN=0, S1LEN=0
-    NRF_RADIO->PCNF0 = 0x00000008;
-    // STATLEN=0, BALEN=4, ENDIAN=0 (little), WHITEEN=1
-    NRF_RADIO->PCNF1 = 0x02040000 | radio_state.max_payload;
-
-    // Enable automatic 16bit CRC generation and checking, and configure how the CRC is calculated.
-    NRF_RADIO->CRCCNF = RADIO_CRCCNF_LEN_Two;
-    NRF_RADIO->CRCINIT = 0xFFFF;
-    NRF_RADIO->CRCPOLY = 0x11021;
-
-    // Set the start random value of the data whitening algorithm. This can be any non zero number.
-    NRF_RADIO->DATAWHITEIV = 0x18;
-
-    // Set the tx/rx packet buffer (must be in RAM).
-    NRF_RADIO->PACKETPTR = (uint32_t)MP_STATE_PORT(radio_buf);
-
-    // configure interrupts
-    NRF_RADIO->INTENSET = 0x00000008;
-    NVIC_SetPriority(RADIO_IRQn, 3);
-    NVIC_ClearPendingIRQ(RADIO_IRQn);
-    NVIC_EnableIRQ(RADIO_IRQn);
-
-    NRF_RADIO->SHORTS |= RADIO_SHORTS_ADDRESS_RSSISTART_Msk;
-
-    // enable receiver
-    NRF_RADIO->EVENTS_READY = 0;
-    NRF_RADIO->TASKS_RXEN = 1;
-    while (NRF_RADIO->EVENTS_READY == 0);
-
-    NRF_RADIO->EVENTS_END = 0;
-    NRF_RADIO->TASKS_START = 1;
 }
 
 void radio_send(const void *buf, size_t len, const void *buf2, size_t len2) {
     ensure_enabled();
-
-    // transmission will occur synchronously
-    NVIC_DisableIRQ(RADIO_IRQn);
-
-    // Turn off the transceiver.
-    NRF_RADIO->EVENTS_DISABLED = 0;
-    NRF_RADIO->TASKS_DISABLE = 1;
-    while (NRF_RADIO->EVENTS_DISABLED == 0);
-
-    // construct the packet
-    // note: we must send from RAM
-    size_t max_len = NRF_RADIO->PCNF1 & 0xff;
-    if (len + len2 > max_len) {
-        if (len > max_len) {
-            len = max_len;
-            len2 = 0;
-        } else {
-            len2 = max_len - len;
-        }
-    }
-    MP_STATE_PORT(radio_buf)[0] = len + len2;
-    memcpy(MP_STATE_PORT(radio_buf) + 1, buf, len);
-    if (len2 != 0) {
-        memcpy(MP_STATE_PORT(radio_buf) + 1 + len, buf2, len2);
-    }
-
-    // Turn on the transmitter, and wait for it to signal that it's ready to use.
-    NRF_RADIO->EVENTS_READY = 0;
-    NRF_RADIO->TASKS_TXEN = 1;
-    while (NRF_RADIO->EVENTS_READY == 0);
-
-    // Start transmission and wait for end of packet.
-    NRF_RADIO->TASKS_START = 1;
-    NRF_RADIO->EVENTS_END = 0;
-    while (NRF_RADIO->EVENTS_END == 0);
-
-    // Turn off the transmitter.
-    NRF_RADIO->EVENTS_DISABLED = 0;
-    NRF_RADIO->TASKS_DISABLE = 1;
-    while (NRF_RADIO->EVENTS_DISABLED == 0);
-
-    // Start listening for the next packet
-    NRF_RADIO->EVENTS_READY = 0;
-    NRF_RADIO->TASKS_RXEN = 1;
-    while (NRF_RADIO->EVENTS_READY == 0);
-
-    NRF_RADIO->EVENTS_END = 0;
-    NRF_RADIO->TASKS_START = 1;
-
-    NVIC_ClearPendingIRQ(RADIO_IRQn);
-    NVIC_EnableIRQ(RADIO_IRQn);
+    uint8_t send_buf[2048];
+    uint32_t send_len = len + len2;
+    memcpy(send_buf, buf, len);
+    memcpy(send_buf + len, buf2, len2);
+    simulator_radio_send(send_buf, send_len);
 }
 
 static mp_obj_t radio_receive(uint8_t *header, mp_buffer_info_t *bufinfo, uint32_t *data_out) {
     ensure_enabled();
 
-    // disable the radio irq while we receive the packet
-    NVIC_DisableIRQ(RADIO_IRQn);
-
-    // get the pointer to the next packet
-    uint8_t *buf = MP_STATE_PORT(radio_buf) + (NRF_RADIO->PCNF1 & 0xff) + RADIO_PACKET_OVERHEAD; // skip tx buf
-
-    // return None if there are no packets waiting
-    if (rx_buf == buf) {
-        NVIC_EnableIRQ(RADIO_IRQn);
+    uint8_t buf[2048];
+    uint32_t len = sizeof(buf);
+    if (simulator_radio_receive(buf, &len)) {
+        mp_obj_t ret;
+        if (!typed_packet) {
+            ret = mp_obj_new_bytes(buf, len); // if it raises the radio irq remains disabled...
+	} else if (len >= 2 && buf[0] == 1 && buf[1] == 0 && buf[2] == 1) {
+	    ret = mp_obj_new_str((char*)buf + 3, len - 3, false); // if it raises the radio irq remains disabled...
+	} else {
+	    nlr_raise(mp_obj_new_exception_msg(&mp_type_ValueError, "received packet is not a string"));
+	}
+	return ret;
+    } else {
         return mp_const_none;
     }
-
-    // convert the packet data into a Python object
-    size_t len = buf[0];
-    mp_obj_t ret;
-    if (header == NULL) {
-        if (bufinfo == NULL) {
-            ret = mp_obj_new_bytes(buf + 1, len); // if it raises the radio irq remains disabled...
-        } else {
-            memmove(bufinfo->buf, buf+1, len < bufinfo->len ? len : bufinfo->len);
-            ret = MP_OBJ_NEW_SMALL_INT(len);
-        }
-    } else {
-        if (len < 3) {
-            header[0] = 0;
-            header[1] = 0;
-            header[2] = 0;
-            header[3] = 0;
-            ret = MP_OBJ_NEW_QSTR(MP_QSTR_); // empty str
-        } else {
-            memcpy(header, buf, 4);
-            ret = mp_obj_new_str((char*)buf + 4, len - 3, false); // if it raises the radio irq remains disabled...
-        }
-    }
-
-    if (data_out != NULL) {
-        // return the RSSI (to be interpreted as a signed value)
-        *data_out = -buf[1 + len];
-
-        // return the timestamp
-        data_out[1] = buf[1 + len + 1] | buf[1 + len + 2] << 8
-            | buf[1 + len + 3] << 16 | buf[1 + len + 4] << 24;
-    }
-
-    // copy the rest of the packets down and restart the radio
-    memmove(buf, buf + RADIO_PACKET_OVERHEAD + len, rx_buf - (buf + RADIO_PACKET_OVERHEAD + len));
-    rx_buf -= RADIO_PACKET_OVERHEAD + len;
-    NVIC_EnableIRQ(RADIO_IRQn);
-
-    return ret;
 }
 
 /*****************************************************************************/
@@ -408,36 +238,12 @@ STATIC mp_obj_t mod_radio_config(size_t n_args, const mp_obj_t *pos_args, mp_map
         } else {
             // only registers changed so make the changes go through efficiently
 
-            // disable radio
-            NVIC_DisableIRQ(RADIO_IRQn);
-            NRF_RADIO->EVENTS_DISABLED = 0;
-            NRF_RADIO->TASKS_DISABLE = 1;
-            while (NRF_RADIO->EVENTS_DISABLED == 0);
-
             // change state
             radio_state = new_state;
-            NRF_RADIO->TXPOWER = radio_state.power_dbm;
-            NRF_RADIO->FREQUENCY = radio_state.channel;
-            NRF_RADIO->MODE = radio_state.data_rate;
-            NRF_RADIO->BASE0 = radio_state.base0;
-            NRF_RADIO->PREFIX0 = radio_state.prefix0;
-
-            // need to set RXEN for FREQUENCY decision point
-            NRF_RADIO->EVENTS_READY = 0;
-            NRF_RADIO->TASKS_RXEN = 1;
-            while (NRF_RADIO->EVENTS_READY == 0);
-
-            // need to set START for BASE0 and PREFIX0 decision point
-            NRF_RADIO->EVENTS_END = 0;
-            NRF_RADIO->TASKS_START = 1;
-
-            NVIC_ClearPendingIRQ(RADIO_IRQn);
-            NVIC_EnableIRQ(RADIO_IRQn);
+	    simulator_radio_config(true, radio_state.channel, radio_state.base0, radio_state.prefix0, radio_state.data_rate);
         }
     }
-
     return mp_const_none;
-
 value_error:
     nlr_raise(mp_obj_new_exception_msg_varg(&mp_type_ValueError, "value out of range for argument '%q'", arg_name));
 }
@@ -523,10 +329,6 @@ STATIC const mp_map_elem_t radio_module_globals_table[] = {
     { MP_OBJ_NEW_QSTR(MP_QSTR_receive), (mp_obj_t)&mod_radio_receive_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_receive_bytes_into), (mp_obj_t)&mod_radio_receive_bytes_into_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_receive_full), (mp_obj_t)&mod_radio_receive_full_obj },
-
-    { MP_OBJ_NEW_QSTR(MP_QSTR_RATE_250KBIT), MP_OBJ_NEW_SMALL_INT(RADIO_MODE_MODE_Nrf_250Kbit) },
-    { MP_OBJ_NEW_QSTR(MP_QSTR_RATE_1MBIT), MP_OBJ_NEW_SMALL_INT(RADIO_MODE_MODE_Nrf_1Mbit) },
-    { MP_OBJ_NEW_QSTR(MP_QSTR_RATE_2MBIT), MP_OBJ_NEW_SMALL_INT(RADIO_MODE_MODE_Nrf_2Mbit) },
 };
 
 STATIC MP_DEFINE_CONST_DICT(radio_module_globals, radio_module_globals_table);
